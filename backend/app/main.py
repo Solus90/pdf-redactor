@@ -50,7 +50,7 @@ app.add_middleware(
         "http://localhost:3001",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
-        "https://pdf-redactor-jsg5.onrender.com",
+        "https://pdf-redactor-frontend.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
