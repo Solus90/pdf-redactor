@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="PDF Redactor", version="0.1.0")
 
-# Allow the Next.js dev server (common ports 3000, 3001)
+# Allow frontend origins (local dev + production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -50,6 +50,7 @@ app.add_middleware(
         "http://localhost:3001",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
+        "https://pdf-redactor-jsg5.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
