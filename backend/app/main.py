@@ -3,8 +3,9 @@ FastAPI application — PDF Redactor for multi-show sponsorship contracts.
 
 Endpoints:
   POST /api/upload    — Upload a PDF; extract text blocks.
-  POST /api/classify  — Classify blocks by show via OpenAI.
+  POST /api/classify  — Classify blocks by show via Claude AI.
   POST /api/redact    — Generate a redacted PDF for a selected show.
+  POST /api/extract   — Extract structured data and push to Google Sheets.
 """
 
 import os
@@ -23,9 +24,12 @@ from app.models import (
     ClassifyRequest,
     ClassifyResponse,
     RedactRequest,
+    ExtractRequest,
+    ExtractResponse,
 )
 from app.pdf_service import extract_blocks, redact_blocks
-from app.ai_service import classify_blocks
+from app.ai_service import classify_blocks, extract_contract_data
+from app.sheets_service import append_rows
 
 # ---------------------------------------------------------------------------
 # Startup
@@ -106,16 +110,16 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @app.post("/api/classify", response_model=ClassifyResponse)
 async def classify_document(req: ClassifyRequest):
-    """Send extracted blocks to OpenAI for show-level classification."""
+    """Send extracted blocks to Claude for show-level classification."""
 
     doc = documents.get(req.document_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    if not os.environ.get("OPENAI_API_KEY"):
+    if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(
             status_code=503,
-            detail="OpenAI API key not configured. Add OPENAI_API_KEY to backend/.env",
+            detail="Anthropic API key not configured. Add ANTHROPIC_API_KEY to backend/.env",
         )
 
     try:
@@ -124,7 +128,7 @@ async def classify_document(req: ClassifyRequest):
         logger.exception("Classification failed: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail=f"OpenAI classification failed: {exc!s}. Check your API key and quota.",
+            detail=f"Claude classification failed: {exc!s}. Check your API key and quota.",
         ) from exc
     doc["classification"] = classification
 
@@ -182,4 +186,64 @@ async def redact_document(req: RedactRequest):
         headers={
             "Content-Disposition": f'attachment; filename="redacted_{req.selected_show}.pdf"'
         },
+    )
+
+
+@app.post("/api/extract", response_model=ExtractResponse)
+async def extract_to_sheets(req: ExtractRequest):
+    """Extract structured contract data and push to Google Sheets."""
+
+    doc = documents.get(req.document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    classification = doc.get("classification")
+    if classification is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Document has not been classified yet. Call /api/classify first.",
+        )
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="Anthropic API key not configured. Add ANTHROPIC_API_KEY to backend/.env",
+        )
+
+    # Step 1: Extract structured data via AI
+    try:
+        show_data = await extract_contract_data(doc["blocks"], classification)
+    except Exception as exc:
+        logger.exception("Data extraction failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Data extraction failed: {exc!s}",
+        ) from exc
+
+    if not show_data:
+        raise HTTPException(
+            status_code=422,
+            detail="AI could not extract any show data from the contract.",
+        )
+
+    # Step 2: Push to Google Sheets
+    try:
+        sheet_url = append_rows(show_data)
+    except Exception as exc:
+        logger.exception("Google Sheets export failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Google Sheets export failed: {exc!s}. Check credentials and sheet ID.",
+        ) from exc
+
+    logger.info(
+        "Exported %d rows to Google Sheets for document %s",
+        len(show_data),
+        req.document_id,
+    )
+
+    return ExtractResponse(
+        shows=show_data,
+        rows_added=len(show_data),
+        sheet_url=sheet_url,
     )

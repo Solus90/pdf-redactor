@@ -1,6 +1,24 @@
 "use client";
 
 import { useState, useRef } from "react";
+import Box from "@mui/material/Box";
+import Paper from "@mui/material/Paper";
+import Typography from "@mui/material/Typography";
+import Button from "@mui/material/Button";
+import Alert from "@mui/material/Alert";
+import FormControl from "@mui/material/FormControl";
+import Select from "@mui/material/Select";
+import MenuItem from "@mui/material/MenuItem";
+import List from "@mui/material/List";
+import ListItem from "@mui/material/ListItem";
+import ListItemText from "@mui/material/ListItemText";
+import Link from "@mui/material/Link";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
+import SearchIcon from "@mui/icons-material/Search";
+import DownloadIcon from "@mui/icons-material/Download";
+import DescriptionIcon from "@mui/icons-material/Description";
+import TableChartIcon from "@mui/icons-material/TableChart";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 
 // ---------------------------------------------------------------------------
 // Types matching the backend response models
@@ -24,6 +42,11 @@ interface ClassifyResponse {
   assignments: Record<string, number[]>;
 }
 
+interface ExtractResponse {
+  rows_added: number;
+  sheet_url: string;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -35,41 +58,31 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 // ---------------------------------------------------------------------------
 
 export default function Home() {
-  // Upload state
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
-
-  // Classification state
   const [classifying, setClassifying] = useState(false);
   const [classification, setClassification] = useState<ClassifyResponse | null>(
     null
   );
-
-  // Redaction state
   const [selectedShow, setSelectedShow] = useState<string>("");
   const [redacting, setRedacting] = useState(false);
-
-  // Error state
+  const [extracting, setExtracting] = useState(false);
+  const [extractResult, setExtractResult] = useState<ExtractResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // -------------------------------------------------------------------------
-  // Handlers
-  // -------------------------------------------------------------------------
-
-  /** Reset everything for a new document */
   function resetAll() {
     setFile(null);
     setUploadResult(null);
     setClassification(null);
     setSelectedShow("");
+    setExtractResult(null);
     setError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  /** Step 1: Upload PDF and extract text blocks */
   async function handleUpload() {
     if (!file) return;
     setError(null);
@@ -80,17 +93,14 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-
       const res = await fetch(`${API_URL}/api/upload`, {
         method: "POST",
         body: formData,
       });
-
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || `Upload failed (${res.status})`);
       }
-
       const data: UploadResponse = await res.json();
       setUploadResult(data);
     } catch (err: unknown) {
@@ -100,14 +110,12 @@ export default function Home() {
     }
   }
 
-  /** Step 2: Classify blocks via AI */
   async function handleClassify() {
     if (!uploadResult) return;
     setError(null);
     setClassifying(true);
 
     try {
-      // Classify can take 60–90+ seconds for large documents; use a long timeout
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 120000);
       const res = await fetch(`${API_URL}/api/classify`, {
@@ -122,14 +130,15 @@ export default function Home() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || `Classification failed (${res.status})`);
       }
-
       const data: ClassifyResponse = await res.json();
       setClassification(data);
       if (data.shows.length > 0) setSelectedShow(data.shows[0]);
     } catch (err: unknown) {
       if (err instanceof Error) {
         if (err.name === "AbortError") {
-          setError("Classification timed out (took longer than 2 minutes). Try a smaller PDF.");
+          setError(
+            "Classification timed out (took longer than 2 minutes). Try a smaller PDF."
+          );
           return;
         }
         setError(err.message);
@@ -141,7 +150,6 @@ export default function Home() {
     }
   }
 
-  /** Step 3: Generate redacted PDF and trigger download */
   async function handleRedact() {
     if (!uploadResult || !selectedShow) return;
     setError(null);
@@ -156,13 +164,10 @@ export default function Home() {
           selected_show: selectedShow,
         }),
       });
-
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || `Redaction failed (${res.status})`);
       }
-
-      // Download the PDF blob
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -179,148 +184,418 @@ export default function Home() {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Render
-  // -------------------------------------------------------------------------
+  async function handleExtract() {
+    if (!uploadResult) return;
+    setError(null);
+    setExtracting(true);
+    setExtractResult(null);
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      const res = await fetch(`${API_URL}/api/extract`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: uploadResult.document_id }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Export failed (${res.status})`);
+      }
+      const data: ExtractResponse = await res.json();
+      setExtractResult(data);
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        if (err.name === "AbortError") {
+          setError("Export timed out. Try again.");
+          return;
+        }
+        setError(err.message);
+        return;
+      }
+      setError("Export to Google Sheets failed");
+    } finally {
+      setExtracting(false);
+    }
+  }
 
   return (
-    <main className="min-h-screen bg-background flex items-start justify-center p-8">
-      <div className="w-full max-w-2xl space-y-6">
-        {/* Header */}
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">PDF Redactor</h1>
-          <p className="text-sm text-foreground/60 mt-1">
-            Upload a multi-show sponsorship contract, classify blocks by show,
-            and download a redacted version.
-          </p>
-        </div>
-
-        {/* Error banner */}
-        {error && (
-          <div className="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
-            {error}
-          </div>
-        )}
-
-        {/* ---- Step 1: Upload ---- */}
-        <section className="rounded-lg border border-foreground/10 p-5 space-y-4">
-          <h2 className="text-lg font-semibold">1. Upload PDF</h2>
-
-          <div className="flex items-center gap-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf"
-              onChange={(e) => {
-                setFile(e.target.files?.[0] ?? null);
-                // Reset downstream state when a new file is selected
-                setUploadResult(null);
-                setClassification(null);
-                setSelectedShow("");
+    <Box
+      sx={{
+        minHeight: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        bgcolor: "background.default",
+      }}
+    >
+      <Box
+        component="main"
+        sx={{
+          flex: 1,
+          display: "flex",
+          justifyContent: "center",
+          px: 2,
+          py: 6,
+          pb: 8,
+        }}
+      >
+        <Box sx={{ width: "100%", maxWidth: 560, display: "flex", flexDirection: "column", gap: 3 }}>
+          {/* Logo + Header */}
+          <Box sx={{ textAlign: "center" }}>
+            <Box
+              component="img"
+              src="/redactExtract.png"
+              alt="Redact & Extract"
+              sx={{
+                maxWidth: 320,
+                width: "100%",
+                height: "auto",
+                mx: "auto",
+                mb: 1.5,
               }}
-              className="text-sm file:mr-3 file:rounded-md file:border-0 file:bg-foreground/10 file:px-3 file:py-1.5 file:text-sm file:font-medium hover:file:bg-foreground/15 cursor-pointer"
             />
-            <button
-              onClick={handleUpload}
-              disabled={!file || uploading}
-              className="rounded-md bg-foreground text-background px-4 py-1.5 text-sm font-medium disabled:opacity-40 hover:opacity-90 transition-opacity"
-            >
-              {uploading ? "Uploading..." : "Upload"}
-            </button>
-          </div>
+            <Typography variant="body1" color="text.secondary">
+              Create a clean copy of your sponsorship contract for a single show.
+              Upload your PDF, pick the show you need, and download.
+            </Typography>
+          </Box>
 
-          {uploadResult && (
-            <div className="text-sm text-foreground/70 space-y-1">
-              <p>
-                Extracted <strong>{uploadResult.blocks.length}</strong> text
-                blocks across <strong>{uploadResult.page_count}</strong> pages.
-              </p>
-              <button
-                onClick={resetAll}
-                className="text-xs underline underline-offset-2 opacity-60 hover:opacity-100"
-              >
-                Start over
-              </button>
-            </div>
+          {/* Error */}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
           )}
-        </section>
 
-        {/* ---- Step 2: Classify ---- */}
-        {uploadResult && (
-          <section className="rounded-lg border border-foreground/10 p-5 space-y-4">
-            <h2 className="text-lg font-semibold">2. Classify Blocks</h2>
-            <p className="text-sm text-foreground/60">
-              Send extracted blocks to AI for show-level classification.
-            </p>
+          {/* Step 1: Upload */}
+          <Paper elevation={0} sx={{ p: 3 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 2 }}>
+              <Box
+                sx={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: "50%",
+                  bgcolor: "primary.main",
+                  color: "white",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  typography: "subtitle2",
+                  fontWeight: 700,
+                }}
+              >
+                1
+              </Box>
+              <Typography variant="h6">Upload your contract</Typography>
+            </Box>
 
-            <button
-              onClick={handleClassify}
-              disabled={classifying}
-              className="rounded-md bg-foreground text-background px-4 py-1.5 text-sm font-medium disabled:opacity-40 hover:opacity-90 transition-opacity"
-            >
-              {classifying ? "Classifying..." : "Classify Document"}
-            </button>
+            <Box sx={{ display: "flex", flexDirection: { xs: "column", sm: "row" }, gap: 2 }}>
+              <Button
+                component="label"
+                variant="outlined"
+                startIcon={<DescriptionIcon />}
+                sx={{
+                  flex: 1,
+                  py: 2,
+                  borderStyle: "dashed",
+                  borderWidth: 2,
+                  "&:hover": {
+                    borderWidth: 2,
+                    borderStyle: "dashed",
+                    bgcolor: "action.hover",
+                  },
+                }}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf"
+                  hidden
+                  onChange={(e) => {
+                    setFile(e.target.files?.[0] ?? null);
+                    setUploadResult(null);
+                    setClassification(null);
+                    setSelectedShow("");
+                  }}
+                />
+                {file ? file.name : "Choose a PDF file"}
+              </Button>
+              <Button
+                variant="contained"
+                startIcon={<UploadFileIcon />}
+                onClick={handleUpload}
+                disabled={!file || uploading}
+                sx={{ alignSelf: { xs: "stretch", sm: "center" } }}
+              >
+                {uploading ? "Uploading…" : "Upload"}
+              </Button>
+            </Box>
 
-            {classification && (
-              <div className="text-sm space-y-2">
-                <p className="font-medium">
-                  Detected {classification.shows.length} show
-                  {classification.shows.length !== 1 ? "s" : ""}:
-                </p>
-                <ul className="list-disc list-inside text-foreground/70 space-y-1">
-                  {classification.shows.map((show) => (
-                    <li key={show}>
-                      {show}{" "}
-                      <span className="text-foreground/40">
-                        ({classification.assignments[show]?.length ?? 0} blocks)
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                <p className="text-foreground/50 text-xs">
-                  Global blocks:{" "}
-                  {classification.assignments["GLOBAL"]?.length ?? 0} |
-                  Unclassified:{" "}
-                  {classification.assignments["UNCLASSIFIED"]?.length ?? 0}
-                </p>
-              </div>
+            {uploadResult && (
+              <Box
+                sx={{
+                  mt: 2,
+                  pt: 2,
+                  borderTop: 1,
+                  borderColor: "divider",
+                  display: "flex",
+                  flexWrap: "wrap",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 1,
+                }}
+              >
+                <Typography variant="body2" color="text.secondary">
+                  ✓ {uploadResult.blocks.length} sections found across{" "}
+                  {uploadResult.page_count} pages
+                </Typography>
+                <Button size="small" color="primary" onClick={resetAll}>
+                  Start over
+                </Button>
+              </Box>
             )}
-          </section>
-        )}
+          </Paper>
 
-        {/* ---- Step 3: Redact & Download ---- */}
-        {classification && classification.shows.length > 0 && (
-          <section className="rounded-lg border border-foreground/10 p-5 space-y-4">
-            <h2 className="text-lg font-semibold">3. Redact & Download</h2>
-            <p className="text-sm text-foreground/60">
-              Select a show to keep. All content unrelated to that show (and
-              non-global content) will be permanently redacted.
-            </p>
+          {/* Step 2: Classify */}
+          {uploadResult && (
+            <Paper elevation={0} sx={{ p: 3 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 0.5 }}>
+                <Box
+                  sx={{
+                    width: 36,
+                    height: 36,
+                    borderRadius: "50%",
+                    bgcolor: "primary.main",
+                    color: "white",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    typography: "subtitle2",
+                    fontWeight: 700,
+                  }}
+                >
+                  2
+                </Box>
+                <Typography variant="h6">Identify the shows</Typography>
+              </Box>
+              <Typography variant="body2" color="text.secondary" sx={{ ml: 5, mb: 2 }}>
+                We&apos;ll scan your document to find each show mentioned in the contract.
+              </Typography>
 
-            <div className="flex items-center gap-3">
-              <select
-                value={selectedShow}
-                onChange={(e) => setSelectedShow(e.target.value)}
-                className="rounded-md border border-foreground/20 bg-background px-3 py-1.5 text-sm"
+              <Button
+                variant="contained"
+                color="secondary"
+                startIcon={<SearchIcon />}
+                onClick={handleClassify}
+                disabled={classifying}
+                sx={{ ml: 5 }}
               >
-                {classification.shows.map((show) => (
-                  <option key={show} value={show}>
-                    {show}
-                  </option>
-                ))}
-              </select>
+                {classifying ? "Scanning…" : "Scan document"}
+              </Button>
 
-              <button
-                onClick={handleRedact}
-                disabled={!selectedShow || redacting}
-                className="rounded-md bg-foreground text-background px-4 py-1.5 text-sm font-medium disabled:opacity-40 hover:opacity-90 transition-opacity"
+              {classification && (
+                <Box sx={{ ml: 5, mt: 2 }}>
+                  <Typography variant="body2" fontWeight={600} sx={{ mb: 1 }}>
+                    Found {classification.shows.length} show
+                    {classification.shows.length !== 1 ? "s" : ""}:
+                  </Typography>
+                  <List dense disablePadding>
+                    {classification.shows.map((show) => (
+                      <ListItem
+                        key={show}
+                        sx={{
+                          bgcolor: "action.hover",
+                          borderRadius: 1,
+                          mb: 0.5,
+                          py: 1,
+                        }}
+                      >
+                        <ListItemText
+                          primary={show}
+                          secondary={`${classification.assignments[show]?.length ?? 0} sections`}
+                          secondaryTypographyProps={{ variant: "caption" }}
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
+                    Also found {classification.assignments["GLOBAL"]?.length ?? 0}{" "}
+                    shared sections (signatures, terms, etc.)
+                  </Typography>
+                </Box>
+              )}
+            </Paper>
+          )}
+
+          {/* Step 3: Redact & Download */}
+          {classification && classification.shows.length > 0 && (
+            <Paper elevation={0} sx={{ p: 3 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 0.5 }}>
+                <Box
+                  sx={{
+                    width: 36,
+                    height: 36,
+                    borderRadius: "50%",
+                    bgcolor: "secondary.main",
+                    color: "white",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    typography: "subtitle2",
+                    fontWeight: 700,
+                  }}
+                >
+                  3
+                </Box>
+                <Typography variant="h6">Get your redacted copy</Typography>
+              </Box>
+              <Typography variant="body2" color="text.secondary" sx={{ ml: 5, mb: 2 }}>
+                Pick the show you need. We&apos;ll create a new PDF with only that
+                show&apos;s content—everything else is removed for good.
+              </Typography>
+
+              <Box
+                sx={{
+                  ml: 5,
+                  display: "flex",
+                  flexDirection: { xs: "column", sm: "row" },
+                  gap: 2,
+                }}
               >
-                {redacting ? "Generating..." : "Generate Redacted PDF"}
-              </button>
-            </div>
-          </section>
-        )}
-      </div>
-    </main>
+                <FormControl size="small" sx={{ minWidth: 200 }}>
+                  <Select
+                    value={selectedShow}
+                    onChange={(e) => setSelectedShow(e.target.value)}
+                    displayEmpty
+                  >
+                    {classification.shows.map((show) => (
+                      <MenuItem key={show} value={show}>
+                        {show}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Button
+                  variant="contained"
+                  color="secondary"
+                  startIcon={<DownloadIcon />}
+                  onClick={handleRedact}
+                  disabled={!selectedShow || redacting}
+                  sx={{ alignSelf: { xs: "stretch", sm: "flex-start" } }}
+                >
+                  {redacting ? "Creating PDF…" : "Download PDF"}
+                </Button>
+              </Box>
+            </Paper>
+          )}
+
+          {/* Step 4: Export to Google Sheets */}
+          {classification && classification.shows.length > 0 && (
+            <Paper elevation={0} sx={{ p: 3 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 0.5 }}>
+                <Box
+                  sx={{
+                    width: 36,
+                    height: 36,
+                    borderRadius: "50%",
+                    bgcolor: "success.main",
+                    color: "white",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    typography: "subtitle2",
+                    fontWeight: 700,
+                  }}
+                >
+                  4
+                </Box>
+                <Typography variant="h6">Export to Google Sheets</Typography>
+              </Box>
+              <Typography variant="body2" color="text.secondary" sx={{ ml: 5, mb: 2 }}>
+                Extract sponsor details, costs, billing terms, and more for each
+                show and add them to your Google Sheet.
+              </Typography>
+
+              <Box sx={{ ml: 5 }}>
+                <Button
+                  variant="contained"
+                  color="success"
+                  startIcon={<TableChartIcon />}
+                  onClick={handleExtract}
+                  disabled={extracting}
+                >
+                  {extracting ? "Exporting…" : "Export to Sheets"}
+                </Button>
+
+                {extractResult && (
+                  <Box
+                    sx={{
+                      mt: 2,
+                      p: 2,
+                      bgcolor: "success.main",
+                      color: "white",
+                      borderRadius: 2,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1.5,
+                    }}
+                  >
+                    <Typography variant="body2" sx={{ flex: 1 }}>
+                      {extractResult.rows_added} row
+                      {extractResult.rows_added !== 1 ? "s" : ""} added
+                      successfully.
+                    </Typography>
+                    <Link
+                      href={extractResult.sheet_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      sx={{
+                        color: "white",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 0.5,
+                        fontWeight: 600,
+                        fontSize: "0.875rem",
+                      }}
+                    >
+                      Open Sheet <OpenInNewIcon fontSize="small" />
+                    </Link>
+                  </Box>
+                )}
+              </Box>
+            </Paper>
+          )}
+        </Box>
+      </Box>
+
+      {/* Footer */}
+      <Box
+        component="footer"
+        sx={{
+          position: "fixed",
+          bottom: 0,
+          right: 0,
+          p: 2,
+        }}
+      >
+        <Typography
+          component="a"
+          href="https://lorienweb.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          variant="body2"
+          color="text.secondary"
+          sx={{
+            textDecoration: "none",
+            "&:hover": { color: "primary.main" },
+          }}
+        >
+          Designed and built by Lorien Web
+        </Typography>
+      </Box>
+    </Box>
   );
 }
