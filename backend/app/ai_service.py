@@ -115,7 +115,7 @@ def _get_client() -> anthropic.AsyncAnthropic:
 
 def _get_model() -> str:
     """Get the configured Claude model name."""
-    return os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
 
 
 async def classify_blocks(blocks: list[TextBlock]) -> ClassifyResponse:

@@ -6,7 +6,7 @@ Internal tool for redacting multi-show sponsorship contracts and extracting stru
 
 1. **Upload** a text-based PDF contract.
 2. The backend extracts every text block with its page number and bounding box.
-3. **Classify** — blocks are sent to OpenAI, which identifies shows and assigns each block to a show, `GLOBAL` (applies to all shows), or `UNCLASSIFIED`.
+3. **Classify** — blocks are sent to Claude AI, which identifies shows and assigns each block to a show, `GLOBAL` (applies to all shows), or `UNCLASSIFIED`.
 4. **Redact** — select a show; the tool keeps that show's blocks plus `GLOBAL` blocks and permanently redacts everything else using PyMuPDF redaction annotations.
 5. **Export to Sheets** — extract structured data (sponsor name, costs, billing cycle, air dates, etc.) for each show and push it directly to a Google Sheet.
 
@@ -14,7 +14,7 @@ Internal tool for redacting multi-show sponsorship contracts and extracting stru
 
 - Python 3.11+
 - Node.js 18+
-- An OpenAI API key
+- An Anthropic API key (for Claude)
 - A Google Cloud service account with Sheets API access (for the export feature)
 
 ## Project Structure
@@ -26,7 +26,7 @@ pdf-redactor/
 │   │   ├── main.py            # FastAPI endpoints + in-memory store
 │   │   ├── models.py          # Pydantic request/response models
 │   │   ├── pdf_service.py     # PDF extraction + redaction (PyMuPDF)
-│   │   ├── ai_service.py      # OpenAI classification + data extraction
+│   │   ├── ai_service.py      # Claude AI classification + data extraction
 │   │   └── sheets_service.py  # Google Sheets integration (gspread)
 │   ├── requirements.txt
 │   └── .env.example
@@ -58,7 +58,7 @@ pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
-# Edit .env and add your OpenAI API key (required)
+# Edit .env and add your Anthropic API key (required)
 # Edit .env and add Google Sheets credentials (required for export feature)
 
 # Start the server
@@ -142,7 +142,7 @@ Each row in the Google Sheet represents one show from one contract:
 | Method | Endpoint         | Description                                      |
 | ------ | ---------------- | ------------------------------------------------ |
 | POST   | `/api/upload`    | Upload PDF, extract text blocks                  |
-| POST   | `/api/classify`  | Classify blocks by show via OpenAI               |
+| POST   | `/api/classify`  | Classify blocks by show via Claude AI            |
 | POST   | `/api/redact`    | Generate redacted PDF for a selected show        |
 | POST   | `/api/extract`   | Extract data and push to Google Sheets           |
 
@@ -153,4 +153,4 @@ Each row in the Google Sheet represents one show from one contract:
 - Redaction is permanent: `apply_redactions()` removes the underlying text from the PDF. The redacted areas appear as black rectangles with no recoverable content.
 - `UNCLASSIFIED` blocks are redacted (conservative approach).
 - The Google Sheets export appends rows — it does not overwrite existing data.
-- Add `credentials.json` to your `.gitignore` to avoid committing secrets.
+- `credentials.json` and `.env` are in `.gitignore` and are not committed.

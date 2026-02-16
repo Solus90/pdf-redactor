@@ -13,6 +13,10 @@ import List from "@mui/material/List";
 import ListItem from "@mui/material/ListItem";
 import ListItemText from "@mui/material/ListItemText";
 import Link from "@mui/material/Link";
+import Dialog from "@mui/material/Dialog";
+import DialogTitle from "@mui/material/DialogTitle";
+import DialogContent from "@mui/material/DialogContent";
+import DialogActions from "@mui/material/DialogActions";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import SearchIcon from "@mui/icons-material/Search";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -70,6 +74,7 @@ export default function Home() {
   const [extracting, setExtracting] = useState(false);
   const [extractResult, setExtractResult] = useState<ExtractResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [privacyModalOpen, setPrivacyModalOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -578,9 +583,30 @@ export default function Home() {
           position: "fixed",
           bottom: 0,
           right: 0,
+          left: 0,
           p: 2,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 2,
         }}
       >
+        <Typography
+          component="button"
+          variant="body2"
+          color="text.secondary"
+          onClick={() => setPrivacyModalOpen(true)}
+          sx={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            padding: 0,
+            textDecoration: "underline",
+            "&:hover": { color: "primary.main" },
+          }}
+        >
+          Privacy Policy
+        </Typography>
         <Typography
           component="a"
           href="https://lorienweb.com"
@@ -596,6 +622,44 @@ export default function Home() {
           Designed and built by Lorien Web
         </Typography>
       </Box>
+
+      {/* Privacy Policy Modal */}
+      <Dialog
+        open={privacyModalOpen}
+        onClose={() => setPrivacyModalOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Privacy Policy</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            This application uses Anthropic&apos;s Claude API to classify and extract
+            information from your PDF contracts. When you use the &quot;Scan document&quot;
+            or &quot;Export to Sheets&quot; features, the text content of your documents
+            is sent to Anthropic&apos;s servers for processing.
+          </Typography>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            According to Anthropic&apos;s policies, they do not use API customer data to
+            train their models. Your data is processed only to fulfill your request
+            and is not retained for model improvement purposes.
+          </Typography>
+          <Typography variant="body2">
+            For full details on how Anthropic handles data, please review their
+            privacy policy:
+          </Typography>
+          <Link
+            href="https://www.anthropic.com/legal/privacy"
+            target="_blank"
+            rel="noopener noreferrer"
+            sx={{ mt: 1, display: "inline-flex", alignItems: "center", gap: 0.5 }}
+          >
+            Anthropic Privacy Policy <OpenInNewIcon fontSize="small" />
+          </Link>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPrivacyModalOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
