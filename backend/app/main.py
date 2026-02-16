@@ -27,6 +27,8 @@ from app.models import (
     ExtractRequest,
     ExtractResponse,
 )
+import gspread.exceptions as gspread_exc
+
 from app.pdf_service import extract_blocks, redact_blocks
 from app.ai_service import classify_blocks, extract_contract_data
 from app.sheets_service import append_rows
@@ -67,6 +69,28 @@ documents: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@app.get("/api/sheets-check")
+async def check_sheets_connection():
+    """
+    Test Google Sheets connection. Returns success or the actual error for debugging.
+    """
+    try:
+        from app.sheets_service import _get_client
+
+        sheet_id = os.environ.get("GOOGLE_SHEET_ID")
+        if not sheet_id or sheet_id.strip() in ("", "your-spreadsheet-id-here"):
+            return {"ok": False, "error": "GOOGLE_SHEET_ID not set in .env"}
+
+        client = _get_client()
+        spreadsheet = client.open_by_key(sheet_id)
+        spreadsheet.url  # trigger access
+        return {"ok": True, "sheet_title": spreadsheet.title}
+    except Exception as exc:
+        msg = str(exc) or (f"{type(exc).__name__}: " + repr(exc.args))
+        logger.exception("Sheets check failed: %s", exc)
+        return {"ok": False, "error": msg, "type": type(exc).__name__}
 
 
 @app.post("/api/upload", response_model=UploadResponse)
@@ -164,11 +188,12 @@ async def redact_document(req: RedactRequest):
         )
 
     # Determine which block IDs to KEEP (selected show + GLOBAL)
+    # GLOBAL_REDACT blocks (aggregate totals) are intentionally NOT kept
     keep_ids: set[int] = set()
     keep_ids.update(classification.assignments.get(req.selected_show, []))
     keep_ids.update(classification.assignments.get("GLOBAL", []))
 
-    # Everything else gets redacted
+    # Everything else gets redacted (other shows, UNCLASSIFIED, GLOBAL_REDACT)
     blocks_to_redact = [b for b in doc["blocks"] if b.block_id not in keep_ids]
 
     logger.info(
@@ -200,10 +225,20 @@ async def extract_to_sheets(req: ExtractRequest):
 
     classification = doc.get("classification")
     if classification is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Document has not been classified yet. Call /api/classify first.",
-        )
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise HTTPException(
+                status_code=503,
+                detail="Anthropic API key not configured. Add ANTHROPIC_API_KEY to backend/.env",
+            )
+        try:
+            classification = await classify_blocks(doc["blocks"])
+            doc["classification"] = classification
+        except Exception as exc:
+            logger.exception("Classification failed during extract: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Classification failed: {exc!s}. Check your API key and quota.",
+            ) from exc
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(
@@ -230,11 +265,42 @@ async def extract_to_sheets(req: ExtractRequest):
     # Step 2: Push to Google Sheets
     try:
         sheet_url = append_rows(show_data)
-    except Exception as exc:
-        logger.exception("Google Sheets export failed: %s", exc)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PermissionError:
         raise HTTPException(
             status_code=503,
-            detail=f"Google Sheets export failed: {exc!s}. Check credentials and sheet ID.",
+            detail="Cannot read credentials.json. Check file permissions and that GOOGLE_CREDENTIALS_PATH points to the correct file.",
+        ) from None
+    except gspread_exc.APIError as exc:
+        msg = str(exc)
+        err = getattr(exc, "error", None)
+        if isinstance(err, dict):
+            msg = err.get("message", msg) or msg
+        if not msg:
+            msg = "Permission denied or invalid sheet ID. Share the sheet with your service account email (in credentials.json) as Editor."
+        raise HTTPException(
+            status_code=503,
+            detail=f"Google Sheets error: {msg}",
+        ) from exc
+    except gspread_exc.SpreadsheetNotFound:
+        raise HTTPException(
+            status_code=503,
+            detail="Spreadsheet not found. Check GOOGLE_SHEET_ID and ensure the sheet is shared with your service account (Editor access).",
+        ) from None
+    except Exception as exc:
+        logger.exception("Google Sheets export failed: %s", exc)
+        # Extract useful message from various exception types
+        msg = str(exc)
+        if not msg and getattr(exc, "args", None):
+            msg = " ".join(str(a) for a in exc.args if a)
+        if not msg and exc.__cause__:
+            msg = str(exc.__cause__)
+        if not msg:
+            msg = f"{type(exc).__name__} (no message)"
+        raise HTTPException(
+            status_code=503,
+            detail=f"Google Sheets export failed: {msg}. Check credentials.json, GOOGLE_SHEET_ID, and that the sheet is shared with the service account.",
         ) from exc
 
     logger.info(

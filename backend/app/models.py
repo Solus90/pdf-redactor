@@ -43,17 +43,18 @@ class RedactRequest(BaseModel):
 
 
 class ShowData(BaseModel):
-    """Structured data extracted from a contract for a single show."""
-    sponsor_name: str
-    show_name: str
-    contract_amount: str
-    contract_terms: str
-    air_dates: str
-    cost: str
-    billing_cycle: str
-    requires_pixel_setup: str  # "Yes" / "No" / "Unknown"
-    requires_drafts: str       # "Yes" / "No" / "Unknown"
-    ad_frequency: str
+    """Structured data extracted from a contract — one row per insertion date."""
+    podcast_booked: str
+    agency: str
+    advertiser: str
+    type: str
+    insertion_date_per_io: str  # single date MM/DD/YYYY
+    draft_required_yn: str  # "Y" / "N"
+    impressions: str
+    amount: str  # per-insertion net price
+    payment_terms: str
+    requires_pixel_tracker_yn: str  # "Y" / "N"
+    notes: str
 
 
 class ExtractRequest(BaseModel):

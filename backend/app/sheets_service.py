@@ -5,6 +5,7 @@ Pushes extracted contract data to a fixed Google Sheet
 configured via environment variables.
 """
 
+import json
 import os
 import logging
 
@@ -16,45 +17,69 @@ logger = logging.getLogger(__name__)
 
 # Column headers matching the ShowData fields
 HEADERS = [
-    "Sponsor Name",
-    "Show Name",
-    "Contract Amount",
-    "Contract Terms",
-    "Air Dates / Flight Dates",
-    "Cost",
-    "Billing Cycle",
-    "Requires Pixel Setup",
-    "Requires Drafts",
-    "Ad Frequency",
+    "Podcast Booked",
+    "Agency",
+    "Advertiser",
+    "Type",
+    "Insertion Date Per IO",
+    "Draft Required (Y/N)",
+    "Impressions",
+    "Amount",
+    "Payment Terms",
+    "Requires Pixel Tracker(Y/N)",
+    "Notes",
 ]
 
 
 def _get_client() -> gspread.Client:
     """Create an authorized gspread client from the service account credentials."""
 
+    # Option 1: Credentials from env var (avoids file permission issues)
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        try:
+            creds_dict = json.loads(creds_json)
+            return gspread.service_account_from_dict(creds_dict)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                "GOOGLE_CREDENTIALS_JSON is invalid JSON. Paste the full contents of credentials.json."
+            ) from e
+
+    # Option 2: Credentials from file
     creds_path = os.environ.get("GOOGLE_CREDENTIALS_PATH", "./credentials.json")
+    if not os.path.isabs(creds_path):
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        creds_path = os.path.normpath(os.path.join(backend_dir, creds_path))
+    creds_path = os.path.abspath(creds_path)
+
     if not os.path.exists(creds_path):
         raise FileNotFoundError(
             f"Google credentials file not found at '{creds_path}'. "
-            "Set GOOGLE_CREDENTIALS_PATH in .env or place credentials.json in the backend/ directory."
+            "Set GOOGLE_CREDENTIALS_PATH in .env, or use GOOGLE_CREDENTIALS_JSON with the full JSON."
         )
 
     return gspread.service_account(filename=creds_path)
 
 
-def _show_data_to_row(show: ShowData) -> list[str]:
+def _yn_to_bool(value: str) -> bool:
+    """Convert Y/N string to boolean for Google Sheets checkboxes."""
+    return value.strip().upper() in ("Y", "YES", "TRUE")
+
+
+def _show_data_to_row(show: ShowData) -> list:
     """Convert a ShowData object to a flat list of cell values."""
     return [
-        show.sponsor_name,
-        show.show_name,
-        show.contract_amount,
-        show.contract_terms,
-        show.air_dates,
-        show.cost,
-        show.billing_cycle,
-        show.requires_pixel_setup,
-        show.requires_drafts,
-        show.ad_frequency,
+        show.podcast_booked,
+        show.agency,
+        show.advertiser,
+        show.type,
+        show.insertion_date_per_io,
+        _yn_to_bool(show.draft_required_yn),
+        show.impressions,
+        show.amount,
+        show.payment_terms,
+        _yn_to_bool(show.requires_pixel_tracker_yn),
+        show.notes,
     ]
 
 
@@ -72,9 +97,9 @@ def append_rows(rows: list[ShowData]) -> str:
     """
 
     sheet_id = os.environ.get("GOOGLE_SHEET_ID")
-    if not sheet_id:
+    if not sheet_id or sheet_id.strip() in ("", "your-spreadsheet-id-here"):
         raise ValueError(
-            "GOOGLE_SHEET_ID not configured. Add it to backend/.env"
+            "GOOGLE_SHEET_ID not configured. Add your Google Sheet ID to backend/.env (the long ID from the sheet URL)."
         )
 
     client = _get_client()
@@ -84,13 +109,13 @@ def append_rows(rows: list[ShowData]) -> str:
     # Write headers if the sheet is empty
     existing = worksheet.get_all_values()
     if not existing:
-        worksheet.append_row(HEADERS, value_input_option="USER_ENTERED")
+        worksheet.append_row(HEADERS, value_input_option="USER_ENTERED", table_range="A1")
         logger.info("Wrote header row to Google Sheet")
 
     # Append each show as a row
     for show in rows:
         row = _show_data_to_row(show)
-        worksheet.append_row(row, value_input_option="USER_ENTERED")
+        worksheet.append_row(row, value_input_option="USER_ENTERED", table_range="A1")
 
     logger.info("Appended %d rows to Google Sheet '%s'", len(rows), sheet_id)
     return spreadsheet.url

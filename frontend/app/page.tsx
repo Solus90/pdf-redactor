@@ -18,7 +18,6 @@ import DialogTitle from "@mui/material/DialogTitle";
 import DialogContent from "@mui/material/DialogContent";
 import DialogActions from "@mui/material/DialogActions";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
-import SearchIcon from "@mui/icons-material/Search";
 import DownloadIcon from "@mui/icons-material/Download";
 import DescriptionIcon from "@mui/icons-material/Description";
 import TableChartIcon from "@mui/icons-material/TableChart";
@@ -41,12 +40,13 @@ interface UploadResponse {
   page_count: number;
 }
 
-interface ClassifyResponse {
-  shows: string[];
-  assignments: Record<string, number[]>;
+interface ShowData {
+  podcast_booked: string;
+  [key: string]: string;
 }
 
 interface ExtractResponse {
+  shows: ShowData[];
   rows_added: number;
   sheet_url: string;
 }
@@ -65,10 +65,6 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
-  const [classifying, setClassifying] = useState(false);
-  const [classification, setClassification] = useState<ClassifyResponse | null>(
-    null
-  );
   const [selectedShow, setSelectedShow] = useState<string>("");
   const [redacting, setRedacting] = useState(false);
   const [extracting, setExtracting] = useState(false);
@@ -81,7 +77,6 @@ export default function Home() {
   function resetAll() {
     setFile(null);
     setUploadResult(null);
-    setClassification(null);
     setSelectedShow("");
     setExtractResult(null);
     setError(null);
@@ -92,7 +87,7 @@ export default function Home() {
     if (!file) return;
     setError(null);
     setUploading(true);
-    setClassification(null);
+    setExtractResult(null);
     setSelectedShow("");
 
     try {
@@ -112,46 +107,6 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setUploading(false);
-    }
-  }
-
-  async function handleClassify() {
-    if (!uploadResult) return;
-    setError(null);
-    setClassifying(true);
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000);
-      const res = await fetch(`${API_URL}/api/classify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_id: uploadResult.document_id }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || `Classification failed (${res.status})`);
-      }
-      const data: ClassifyResponse = await res.json();
-      setClassification(data);
-      if (data.shows.length > 0) setSelectedShow(data.shows[0]);
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        if (err.name === "AbortError") {
-          setError(
-            "Classification timed out (took longer than 2 minutes). Try a smaller PDF."
-          );
-          return;
-        }
-        setError(err.message);
-        return;
-      }
-      setError("Classification failed");
-    } finally {
-      setClassifying(false);
     }
   }
 
@@ -212,6 +167,8 @@ export default function Home() {
       }
       const data: ExtractResponse = await res.json();
       setExtractResult(data);
+      const showNames = [...new Set(data.shows.map((s) => s.podcast_booked))];
+      if (showNames.length > 0) setSelectedShow(showNames[0]);
     } catch (err: unknown) {
       if (err instanceof Error) {
         if (err.name === "AbortError") {
@@ -322,7 +279,6 @@ export default function Home() {
                   onChange={(e) => {
                     setFile(e.target.files?.[0] ?? null);
                     setUploadResult(null);
-                    setClassification(null);
                     setSelectedShow("");
                   }}
                 />
@@ -364,141 +320,8 @@ export default function Home() {
             )}
           </Paper>
 
-          {/* Step 2: Classify */}
+          {/* Step 2: Extract to Google Sheets */}
           {uploadResult && (
-            <Paper elevation={0} sx={{ p: 3 }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 0.5 }}>
-                <Box
-                  sx={{
-                    width: 36,
-                    height: 36,
-                    borderRadius: "50%",
-                    bgcolor: "primary.main",
-                    color: "white",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    typography: "subtitle2",
-                    fontWeight: 700,
-                  }}
-                >
-                  2
-                </Box>
-                <Typography variant="h6">Identify the shows</Typography>
-              </Box>
-              <Typography variant="body2" color="text.secondary" sx={{ ml: 5, mb: 2 }}>
-                We&apos;ll scan your document to find each show mentioned in the contract.
-              </Typography>
-
-              <Button
-                variant="contained"
-                color="secondary"
-                startIcon={<SearchIcon />}
-                onClick={handleClassify}
-                disabled={classifying}
-                sx={{ ml: 5 }}
-              >
-                {classifying ? "Scanning…" : "Scan document"}
-              </Button>
-
-              {classification && (
-                <Box sx={{ ml: 5, mt: 2 }}>
-                  <Typography variant="body2" fontWeight={600} sx={{ mb: 1 }}>
-                    Found {classification.shows.length} show
-                    {classification.shows.length !== 1 ? "s" : ""}:
-                  </Typography>
-                  <List dense disablePadding>
-                    {classification.shows.map((show) => (
-                      <ListItem
-                        key={show}
-                        sx={{
-                          bgcolor: "action.hover",
-                          borderRadius: 1,
-                          mb: 0.5,
-                          py: 1,
-                        }}
-                      >
-                        <ListItemText
-                          primary={show}
-                          secondary={`${classification.assignments[show]?.length ?? 0} sections`}
-                          secondaryTypographyProps={{ variant: "caption" }}
-                        />
-                      </ListItem>
-                    ))}
-                  </List>
-                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
-                    Also found {classification.assignments["GLOBAL"]?.length ?? 0}{" "}
-                    shared sections (signatures, terms, etc.)
-                  </Typography>
-                </Box>
-              )}
-            </Paper>
-          )}
-
-          {/* Step 3: Redact & Download */}
-          {classification && classification.shows.length > 0 && (
-            <Paper elevation={0} sx={{ p: 3 }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 0.5 }}>
-                <Box
-                  sx={{
-                    width: 36,
-                    height: 36,
-                    borderRadius: "50%",
-                    bgcolor: "secondary.main",
-                    color: "white",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    typography: "subtitle2",
-                    fontWeight: 700,
-                  }}
-                >
-                  3
-                </Box>
-                <Typography variant="h6">Get your redacted copy</Typography>
-              </Box>
-              <Typography variant="body2" color="text.secondary" sx={{ ml: 5, mb: 2 }}>
-                Pick the show you need. We&apos;ll create a new PDF with only that
-                show&apos;s content—everything else is removed for good.
-              </Typography>
-
-              <Box
-                sx={{
-                  ml: 5,
-                  display: "flex",
-                  flexDirection: { xs: "column", sm: "row" },
-                  gap: 2,
-                }}
-              >
-                <FormControl size="small" sx={{ minWidth: 200 }}>
-                  <Select
-                    value={selectedShow}
-                    onChange={(e) => setSelectedShow(e.target.value)}
-                    displayEmpty
-                  >
-                    {classification.shows.map((show) => (
-                      <MenuItem key={show} value={show}>
-                        {show}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                <Button
-                  variant="contained"
-                  color="secondary"
-                  startIcon={<DownloadIcon />}
-                  onClick={handleRedact}
-                  disabled={!selectedShow || redacting}
-                  sx={{ alignSelf: { xs: "stretch", sm: "flex-start" } }}
-                >
-                  {redacting ? "Creating PDF…" : "Download PDF"}
-                </Button>
-              </Box>
-            </Paper>
-          )}
-
-          {/* Step 4: Export to Google Sheets */}
-          {classification && classification.shows.length > 0 && (
             <Paper elevation={0} sx={{ p: 3 }}>
               <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 0.5 }}>
                 <Box
@@ -515,7 +338,7 @@ export default function Home() {
                     fontWeight: 700,
                   }}
                 >
-                  4
+                  2
                 </Box>
                 <Typography variant="h6">Export to Google Sheets</Typography>
               </Box>
@@ -570,6 +393,68 @@ export default function Home() {
                     </Link>
                   </Box>
                 )}
+              </Box>
+            </Paper>
+          )}
+
+          {/* Step 3: Generate redactions */}
+          {extractResult && extractResult.shows.length > 0 && (
+            <Paper elevation={0} sx={{ p: 3 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 0.5 }}>
+                <Box
+                  sx={{
+                    width: 36,
+                    height: 36,
+                    borderRadius: "50%",
+                    bgcolor: "secondary.main",
+                    color: "white",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    typography: "subtitle2",
+                    fontWeight: 700,
+                  }}
+                >
+                  3
+                </Box>
+                <Typography variant="h6">Generate redacted copy</Typography>
+              </Box>
+              <Typography variant="body2" color="text.secondary" sx={{ ml: 5, mb: 2 }}>
+                Pick the show you need. We&apos;ll create a new PDF with only that
+                show&apos;s content—everything else is removed for good.
+              </Typography>
+
+              <Box
+                sx={{
+                  ml: 5,
+                  display: "flex",
+                  flexDirection: { xs: "column", sm: "row" },
+                  gap: 2,
+                }}
+              >
+                <FormControl size="small" sx={{ minWidth: 200 }}>
+                  <Select
+                    value={selectedShow}
+                    onChange={(e) => setSelectedShow(e.target.value)}
+                    displayEmpty
+                  >
+                    {[...new Set(extractResult.shows.map((s) => s.podcast_booked))].map((show) => (
+                      <MenuItem key={show} value={show}>
+                        {show}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Button
+                  variant="contained"
+                  color="secondary"
+                  startIcon={<DownloadIcon />}
+                  onClick={handleRedact}
+                  disabled={!selectedShow || redacting}
+                  sx={{ alignSelf: { xs: "stretch", sm: "flex-start" } }}
+                >
+                  {redacting ? "Creating PDF…" : "Download PDF"}
+                </Button>
               </Box>
             </Paper>
           )}
@@ -634,8 +519,8 @@ export default function Home() {
         <DialogContent>
           <Typography variant="body2" sx={{ mb: 2 }}>
             This application uses Anthropic&apos;s Claude API to classify and extract
-            information from your PDF contracts. When you use the &quot;Scan document&quot;
-            or &quot;Export to Sheets&quot; features, the text content of your documents
+            information from your PDF contracts. When you use the &quot;Export to Sheets&quot;
+            or &quot;Download PDF&quot; features, the text content of your documents
             is sent to Anthropic&apos;s servers for processing.
           </Typography>
           <Typography variant="body2" sx={{ mb: 2 }}>

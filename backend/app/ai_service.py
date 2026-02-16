@@ -7,6 +7,7 @@ AI-powered block classification and data extraction using Anthropic Claude.
 
 import json
 import os
+import re
 import logging
 
 import anthropic
@@ -14,6 +15,22 @@ import anthropic
 from app.models import TextBlock, ClassifyResponse, ShowData
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_json_from_response(raw: str) -> str:
+    """Strip markdown code blocks from AI response to get raw JSON."""
+    if not raw or not raw.strip():
+        return "{}"
+    text = raw.strip()
+    if text.startswith("```"):
+        match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+        else:
+            text = re.sub(r"^```\w*\n?", "", text)
+            text = re.sub(r"\n?```\s*$", "", text).strip()
+    return text
+
 
 # Maximum characters per block sent to the model (saves tokens)
 MAX_BLOCK_TEXT_LEN = 500
@@ -29,8 +46,14 @@ Your task:
 1. Identify every unique show/program name mentioned in the contract.
 2. Classify each block into exactly ONE of the following categories:
    - A specific show name (if the block relates to that show only).
-   - "GLOBAL" — if the block applies to ALL shows (e.g., general terms,
-     signatures, party names, dates, governing law, universal clauses).
+   - "GLOBAL" — if the block applies to ALL shows AND does NOT contain
+     financial figures (e.g., general terms, signatures, party names,
+     dates, governing law, universal clauses).
+   - "GLOBAL_REDACT" — if the block applies to all shows BUT contains
+     total contract amounts, aggregate dollar figures, combined costs,
+     grand totals, overall budget summaries, or any financial information
+     that spans multiple shows. These blocks will be redacted so that
+     individual shows cannot calculate what other shows are being paid.
    - "UNCLASSIFIED" — if you cannot confidently determine which show
      the block belongs to.
 
@@ -39,6 +62,8 @@ Rules:
 - Show names should be normalized (consistent capitalization/spelling).
 - Section headers that introduce a show-specific section belong to that show.
 - Shared header/footer text, preamble, and signature blocks are GLOBAL.
+- Any block mentioning a total/combined/aggregate dollar amount that covers
+  more than one show MUST be classified as GLOBAL_REDACT, not GLOBAL.
 
 You MUST respond with ONLY valid JSON (no markdown, no explanation) in this exact structure:
 {
@@ -47,6 +72,7 @@ You MUST respond with ONLY valid JSON (no markdown, no explanation) in this exac
     "Show Name A": [1, 3, 5],
     "Show Name B": [2, 4, 6],
     "GLOBAL": [0, 7, 8],
+    "GLOBAL_REDACT": [10, 11],
     "UNCLASSIFIED": [9]
   }
 }
@@ -101,8 +127,9 @@ def _validate_classification(
         for key in assignments:
             assignments[key] = [i for i in assignments[key] if i in all_block_ids]
 
-    # Ensure GLOBAL and UNCLASSIFIED keys exist
+    # Ensure GLOBAL, GLOBAL_REDACT, and UNCLASSIFIED keys exist
     assignments.setdefault("GLOBAL", [])
+    assignments.setdefault("GLOBAL_REDACT", [])
     assignments.setdefault("UNCLASSIFIED", [])
 
     return ClassifyResponse(shows=shows, assignments=assignments)
@@ -149,10 +176,11 @@ async def classify_blocks(blocks: list[TextBlock]) -> ClassifyResponse:
     raw = response.content[0].text
     logger.info("Received classification response (%d chars)", len(raw))
 
+    text = _strip_json_from_response(raw)
     try:
-        data = json.loads(raw)
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
-        logger.error("Failed to parse AI response as JSON: %s", exc)
+        logger.error("Failed to parse AI response as JSON: %s. Raw (first 300 chars): %r", exc, (raw or "")[:300])
         # Fallback: mark everything as UNCLASSIFIED
         return ClassifyResponse(
             shows=[],
@@ -167,45 +195,68 @@ async def classify_blocks(blocks: list[TextBlock]) -> ClassifyResponse:
 # ---------------------------------------------------------------------------
 
 EXTRACTION_PROMPT = """\
-You are a contract data analyst specializing in multi-show sponsorship agreements.
+You are a contract data analyst specializing in multi-show sponsorship contracts
+(insertion orders). You will receive the text of a contract along with a list of
+show names. Your job is to extract structured data and produce ONE ROW per
+separately-billed line item.
 
-You will receive the text of a sponsorship contract, along with a list of show names
-that appear in the contract. For EACH show, extract the following fields from the
-contract text. Use information from both show-specific sections and any general/global
-sections that apply to all shows.
+IMPORTANT — Row-splitting rules:
+- Each show/program name gets its own row.
+- If a single show has MULTIPLE media types that are billed separately
+  (e.g., podcast line items AND newsletter line items with separate costs),
+  create a SEPARATE row for each media type, even if they share the same
+  show name. Use the show name for podcast_booked in both rows.
+- If a single show's podcast and newsletter are billed TOGETHER (one combined
+  cost), produce ONE row and set the type to "podcast and newsletter".
 
-Fields to extract for each show:
-1. sponsor_name — the sponsoring company or brand name
-2. show_name — the show/program name (use the exact name provided)
-3. contract_amount — the total dollar value or cost for this show's sponsorship
-4. contract_terms — a brief summary of key contract terms (duration, exclusivity, etc.)
-5. air_dates — the date range or flight dates when the sponsorship runs
-6. cost — cost breakdown if available (e.g., per-spot cost, CPM); if same as contract_amount, repeat it
-7. billing_cycle — payment terms (e.g., "Net 30", "Net 45", "Net 60", "Net 90", "Due on receipt")
-8. requires_pixel_setup — "Yes", "No", or "Unknown"
-9. requires_drafts — "Yes", "No", or "Unknown" (whether drafts/creative approval is required)
-10. ad_frequency — how many times the ad/spot needs to run (e.g., "3x per week", "10 spots total")
+Fields to extract for each row:
+1. podcast_booked — the show/program name
+2. agency — the media buying agency or agency of record
+3. advertiser — the sponsoring company or brand name
+4. type — MUST be one of: "podcast", "audio", "audio/video", "social media",
+   "whitelisting", "newsletter", or a combination like "podcast and newsletter"
+   when billed together. Do NOT use ad-format descriptions like "Host-Read",
+   "Mid-Roll", "60s", "Embedded", or "Evergreen" — those are placement details,
+   not the type.
+5. insertion_dates — a JSON array of objects, one per insertion date. Each object
+   has "date" (MM/DD/YYYY) and "amount" (the net price for THAT single insertion,
+   e.g. "$6,000" or "$0"). List every insertion individually.
+6. draft_required_yn — "Y" or "N"
+7. impressions — the number of expected downloads/impressions for this insertion
+   (e.g., "600,000", "361,250", "22,500"). Use the number from the contract.
+8. payment_terms — payment terms (e.g., "Net 60")
+9. requires_pixel_tracker_yn — "Y" or "N"
+10. notes — any relevant details that don't fit in other fields (e.g., placement
+    info like "Mid-Roll, 60s, Baked-in", impression targets, makegood terms,
+    exclusivity clauses, cancellation terms). Use "" if nothing notable.
 
 Rules:
 - If a field is not mentioned in the contract, use "Not specified".
-- Be precise with dollar amounts — include the currency symbol.
-- For dates, use a readable format (e.g., "Jan 1, 2026 – Mar 31, 2026").
-- sponsor_name is typically the same across all shows in one contract.
+- For draft_required_yn and requires_pixel_tracker_yn, use only "Y" or "N";
+  use "N" if unknown.
+- Be precise with dollar amounts — use the per-insertion net price, NOT the
+  total across all insertions.
+- insertion_dates MUST be a JSON array of {"date": "MM/DD/YYYY", "amount": "$X"}.
+  For date ranges like "1/14-1/19/2026", pick the start date: "01/14/2026".
+- Advertiser is typically the same across all rows.
 
-You MUST respond with ONLY valid JSON (no markdown, no explanation) in this exact structure:
+You MUST respond with ONLY raw JSON—no markdown code blocks, no backticks, no explanation. Start directly with { and end with }.
 {
   "shows": [
     {
-      "sponsor_name": "...",
-      "show_name": "...",
-      "contract_amount": "...",
-      "contract_terms": "...",
-      "air_dates": "...",
-      "cost": "...",
-      "billing_cycle": "...",
-      "requires_pixel_setup": "...",
-      "requires_drafts": "...",
-      "ad_frequency": "..."
+      "podcast_booked": "...",
+      "agency": "...",
+      "advertiser": "...",
+      "type": "podcast",
+      "insertion_dates": [
+        {"date": "03/02/2026", "amount": "$6,000"},
+        {"date": "04/01/2026", "amount": "$6,000"}
+      ],
+      "draft_required_yn": "Y or N",
+      "impressions": "600,000",
+      "payment_terms": "...",
+      "requires_pixel_tracker_yn": "Y or N",
+      "notes": "..."
     }
   ]
 }
@@ -285,28 +336,56 @@ async def extract_contract_data(
     raw = response.content[0].text
     logger.info("Received extraction response (%d chars)", len(raw))
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.error("Failed to parse extraction response as JSON: %s", exc)
-        raise ValueError(f"AI returned invalid JSON: {exc}") from exc
+    if not raw or not raw.strip():
+        logger.error("AI returned empty extraction response")
+        raise ValueError("AI returned an empty response. Try again or use a different PDF.")
 
-    # Parse each show into a ShowData object
+    text = _strip_json_from_response(raw)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to parse extraction response: %s. Raw (first 500 chars): %r", exc, raw[:500])
+        raise ValueError(f"AI returned invalid JSON: {exc}. Try uploading again.") from exc
+
+    # Parse each show into ShowData objects — one row per insertion date
     show_list = data.get("shows", [])
     result: list[ShowData] = []
     for item in show_list:
-        result.append(ShowData(
-            sponsor_name=item.get("sponsor_name", "Not specified"),
-            show_name=item.get("show_name", "Not specified"),
-            contract_amount=item.get("contract_amount", "Not specified"),
-            contract_terms=item.get("contract_terms", "Not specified"),
-            air_dates=item.get("air_dates", "Not specified"),
-            cost=item.get("cost", "Not specified"),
-            billing_cycle=item.get("billing_cycle", "Not specified"),
-            requires_pixel_setup=item.get("requires_pixel_setup", "Unknown"),
-            requires_drafts=item.get("requires_drafts", "Unknown"),
-            ad_frequency=item.get("ad_frequency", "Not specified"),
-        ))
+        base = dict(
+            podcast_booked=item.get("podcast_booked", "Not specified"),
+            agency=item.get("agency", "Not specified"),
+            advertiser=item.get("advertiser", "Not specified"),
+            type=item.get("type", "Not specified"),
+            draft_required_yn=item.get("draft_required_yn", "N"),
+            impressions=item.get("impressions", "Not specified"),
+            payment_terms=item.get("payment_terms", "Not specified"),
+            requires_pixel_tracker_yn=item.get("requires_pixel_tracker_yn", "N"),
+            notes=item.get("notes", ""),
+        )
 
-    logger.info("Extracted data for %d shows", len(result))
+        insertions = item.get("insertion_dates", [])
+        # Fallback: old format with insertion_date_per_io
+        if not insertions:
+            old_dates = item.get("insertion_date_per_io", [])
+            old_amount = item.get("amount", "Not specified")
+            if isinstance(old_dates, str):
+                old_dates = [old_dates] if old_dates else ["Not specified"]
+            insertions = [{"date": d, "amount": old_amount} for d in old_dates]
+        if not insertions:
+            insertions = [{"date": "Not specified", "amount": "Not specified"}]
+
+        for ins in insertions:
+            if isinstance(ins, dict):
+                date = ins.get("date", "Not specified")
+                amount = ins.get("amount", "Not specified")
+            else:
+                date = str(ins)
+                amount = "Not specified"
+            result.append(ShowData(
+                insertion_date_per_io=date,
+                amount=amount,
+                **base,
+            ))
+
+    logger.info("Extracted data for %d rows (%d shows expanded by date)", len(result), len(show_list))
     return result

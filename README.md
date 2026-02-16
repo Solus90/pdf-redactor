@@ -1,21 +1,47 @@
 # PDF Redactor
 
-Internal tool for redacting multi-show sponsorship contracts and extracting structured data to Google Sheets. Upload a PDF contract that covers multiple shows, classify text blocks by show using AI, generate a permanently redacted version for a single show, and export sponsor details to a spreadsheet.
+Internal tool for multi-show sponsorship contracts (insertion orders). Upload a PDF, extract structured data to Google Sheets (one row per insertion date), and generate redacted PDFs for individual shows so they cannot see other shows' terms or totals.
 
-## How It Works
+## What It Does
 
-1. **Upload** a text-based PDF contract.
-2. The backend extracts every text block with its page number and bounding box.
-3. **Classify** — blocks are sent to Claude AI, which identifies shows and assigns each block to a show, `GLOBAL` (applies to all shows), or `UNCLASSIFIED`.
-4. **Redact** — select a show; the tool keeps that show's blocks plus `GLOBAL` blocks and permanently redacts everything else using PyMuPDF redaction annotations.
-5. **Export to Sheets** — extract structured data (sponsor name, costs, billing cycle, air dates, etc.) for each show and push it directly to a Google Sheet.
+1. **Upload** — Accepts a text-based PDF, extracts text blocks with PyMuPDF.
+2. **Export to Sheets** — Claude AI classifies blocks by show, extracts per-insertion data, and appends rows to a Google Sheet. One row per insertion date.
+3. **Redact** — Generates a PDF with only one show's content visible; everything else (other shows, aggregate totals, unclassified text) is permanently redacted.
 
-## Prerequisites
+## Flow
 
-- Python 3.11+
-- Node.js 18+
-- An Anthropic API key (for Claude)
-- A Google Cloud service account with Sheets API access (for the export feature)
+```
+Upload PDF → Export to Sheets (classify + extract) → Download Redacted PDF
+```
+
+Export runs classification internally if needed. Redact uses the classification from the prior export.
+
+---
+
+## Key Concepts
+
+### Classification categories
+
+Each text block is assigned to one category:
+
+| Category | Kept in redacted PDF? | Purpose |
+|----------|------------------------|---------|
+| Show name (e.g. "TRIGGERnometry") | Yes, if that show is selected | Show-specific terms and line items |
+| `GLOBAL` | Yes | Shared terms, signatures, party names, general clauses |
+| `GLOBAL_REDACT` | **No** | Aggregate totals, combined costs, grand totals — redacted so shows can't deduce others' amounts |
+| `UNCLASSIFIED` | No | Blocks the AI couldn't confidently assign |
+
+### Row splitting (export)
+
+- One row per **insertion date**. If a show has 22 podcast insertions, you get 22 rows.
+- Podcast and newsletter billed separately → separate rows (e.g. "TRIGGERnometry Podcast", "TRIGGERnometry Newsletter").
+- Podcast and newsletter billed together → one row with type `podcast and newsletter`.
+
+### Type field
+
+Allowed values: `podcast`, `audio`, `audio/video`, `social media`, `whitelisting`, `newsletter`, or `podcast and newsletter`. Placement details (Host-Read, Mid-Roll, 60s, etc.) go in Notes, not Type.
+
+---
 
 ## Project Structure
 
@@ -23,134 +49,152 @@ Internal tool for redacting multi-show sponsorship contracts and extracting stru
 pdf-redactor/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            # FastAPI endpoints + in-memory store
-│   │   ├── models.py          # Pydantic request/response models
-│   │   ├── pdf_service.py     # PDF extraction + redaction (PyMuPDF)
-│   │   ├── ai_service.py      # Claude AI classification + data extraction
-│   │   └── sheets_service.py  # Google Sheets integration (gspread)
+│   │   ├── main.py            # FastAPI app, endpoints, in-memory doc store
+│   │   ├── models.py          # Pydantic models (TextBlock, ShowData, etc.)
+│   │   ├── pdf_service.py     # PyMuPDF: extract blocks, redact
+│   │   ├── ai_service.py      # Claude: classify blocks, extract structured data
+│   │   └── sheets_service.py  # gspread: append rows to Google Sheet
 │   ├── requirements.txt
-│   └── .env.example
+│   ├── .env.example
+│   └── credentials.json       # Google service account (gitignored)
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx           # Single-page UI
+│   │   ├── page.tsx           # Single-page UI (upload, export, redact)
 │   │   ├── layout.tsx
-│   │   ├── theme.ts           # Material UI theme
-│   │   ├── ThemeRegistry.tsx   # MUI + Next.js provider
+│   │   ├── theme.ts
 │   │   └── globals.css
-│   ├── .env.example
 │   └── package.json
 └── README.md
 ```
 
+---
+
+## Extending the App
+
+### Add or change exported columns
+
+1. **`backend/app/models.py`** — Add/update fields on `ShowData`.
+2. **`backend/app/sheets_service.py`** — Update `HEADERS` and `_show_data_to_row()`.
+3. **`backend/app/ai_service.py`** — Update `EXTRACTION_PROMPT` (field descriptions, JSON example) and the parsing loop in `extract_contract_data()`.
+
+### Change extraction logic (row shape, field rules)
+
+- **`backend/app/ai_service.py`** — Edit `EXTRACTION_PROMPT`. The AI returns JSON; the parsing loop in `extract_contract_data()` maps it to `ShowData`. The `insertion_dates` array is expanded into one `ShowData` per date.
+
+### Change classification (what gets redacted)
+
+- **`backend/app/ai_service.py`** — Edit `SYSTEM_PROMPT` to add categories or rules. Ensure `_validate_classification()` sets defaults for new categories.
+- **`backend/app/main.py`** — Redact endpoint keeps `GLOBAL` + selected show. Other categories (e.g. `GLOBAL_REDACT`, `UNCLASSIFIED`) are redacted.
+
+### Change which Google Sheet is used
+
+- **`backend/.env`** — `GOOGLE_SHEET_ID` (spreadsheet ID from URL). The app always uses the first worksheet (`sheet1`). To target another sheet, modify `sheets_service.py` (`spreadsheet.sheet1` → `spreadsheet.worksheet("SheetName")`).
+
+---
+
+## Exported Data Columns
+
+Each row = one insertion date. Draft Required and Requires Pixel Tracker are checkboxes (TRUE/FALSE).
+
+| Column | Description |
+|--------|-------------|
+| Podcast Booked | Show/program name |
+| Agency | Media buying agency |
+| Advertiser | Sponsoring company/brand |
+| Type | `podcast`, `audio`, `audio/video`, `social media`, `whitelisting`, `newsletter`, or `podcast and newsletter` |
+| Insertion Date Per IO | Single date in MM/DD/YYYY |
+| Draft Required (Y/N) | Checkbox — drafts/creative approval required |
+| Impressions | Expected downloads/impressions for that insertion |
+| Amount | Per-insertion net price (e.g. $4,696.25), not total |
+| Payment Terms | e.g. Net 60 |
+| Requires Pixel Tracker(Y/N) | Checkbox — pixel/tracking setup required |
+| Notes | Anything else (placement details, makegood terms, etc.) |
+
+---
+
 ## Setup & Run
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- Anthropic API key (Claude)
+- Google Cloud service account with Sheets API enabled
 
 ### Backend
 
 ```bash
 cd backend
-
-# Create and activate a virtual environment
 python3 -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
 cp .env.example .env
-# Edit .env and add your Anthropic API key (required)
-# Edit .env and add Google Sheets credentials (required for export feature)
+# Edit .env:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   GOOGLE_SHEET_ID=<spreadsheet-id>
+#   GOOGLE_CREDENTIALS_JSON='{"type":"service_account",...}'  # or use GOOGLE_CREDENTIALS_PATH
 
-# Start the server
 uvicorn app.main:app --reload --port 8000
 ```
 
-The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+API: `http://localhost:8000` — Docs: `http://localhost:8000/docs`
 
 ### Frontend
 
 ```bash
 cd frontend
-
-# Install dependencies
 npm install
-
-# Configure environment (optional — defaults to http://localhost:8000)
-cp .env.example .env.local
-
-# Start the dev server
+cp .env.example .env.local   # optional; defaults to localhost:8000
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser.
+Open `http://localhost:3000`.
 
-### Google Sheets Setup
+### Google Sheets
 
-The export feature requires a Google Cloud service account. Follow these steps:
+1. Create a Google Cloud project, enable **Google Sheets API**.
+2. Create a service account, download JSON key.
+3. Either:
+   - Put `credentials.json` in `backend/` and set `GOOGLE_CREDENTIALS_PATH=./credentials.json`, or
+   - Set `GOOGLE_CREDENTIALS_JSON` to the full JSON (single line) — useful if file permissions are an issue.
+4. Create a Google Sheet, share it with the service account email as **Editor**.
+5. Set `GOOGLE_SHEET_ID` to the ID from the sheet URL:  
+   `https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit`
 
-1. **Create a Google Cloud project** (or use an existing one) at [console.cloud.google.com](https://console.cloud.google.com).
+**Debug:** `GET /api/sheets-check` returns connection status or error details.
 
-2. **Enable the Google Sheets API** in the project's API library.
-
-3. **Create a service account**:
-   - Go to IAM & Admin > Service Accounts.
-   - Create a new service account (no special roles needed).
-   - Create a JSON key and download it.
-
-4. **Place the credentials file** in the `backend/` directory (e.g., `backend/credentials.json`).
-
-5. **Create a Google Sheet** (or use an existing one) where data will be exported.
-
-6. **Share the sheet** with the service account's email address (found in the JSON file as `client_email`). Give it **Editor** access.
-
-7. **Update `backend/.env`**:
-   ```
-   GOOGLE_CREDENTIALS_PATH=./credentials.json
-   GOOGLE_SHEET_ID=your-spreadsheet-id-here
-   ```
-   The spreadsheet ID is the long string in the Google Sheet URL:
-   `https://docs.google.com/spreadsheets/d/SPREADSHEET_ID_HERE/edit`
-
-## Usage
-
-1. Open `http://localhost:3000`.
-2. Upload a multi-show sponsorship contract PDF.
-3. Click **Scan document** — wait for AI to identify the shows.
-4. Review the detected shows and section counts.
-5. **Redact**: Select a show from the dropdown and click **Download PDF**.
-6. **Export**: Click **Export to Sheets** to push structured data (sponsor, costs, billing, dates, etc.) to your Google Sheet.
-
-## Exported Data Columns
-
-Each row in the Google Sheet represents one show from one contract:
-
-| Column | Description |
-| --- | --- |
-| Sponsor Name | The sponsoring company or brand |
-| Show Name | The program/show name |
-| Contract Amount | Total dollar value |
-| Contract Terms | Summary of key terms |
-| Air Dates / Flight Dates | Date range the sponsorship runs |
-| Cost | Cost breakdown (per-spot, CPM, etc.) |
-| Billing Cycle | Payment terms (Net 30, Net 60, etc.) |
-| Requires Pixel Setup | Yes / No / Unknown |
-| Requires Drafts | Yes / No / Unknown |
-| Ad Frequency | How many times ads need to run |
+---
 
 ## API Endpoints
 
-| Method | Endpoint         | Description                                      |
-| ------ | ---------------- | ------------------------------------------------ |
-| POST   | `/api/upload`    | Upload PDF, extract text blocks                  |
-| POST   | `/api/classify`  | Classify blocks by show via Claude AI            |
-| POST   | `/api/redact`    | Generate redacted PDF for a selected show        |
-| POST   | `/api/extract`   | Extract data and push to Google Sheets           |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/upload` | Upload PDF, extract text blocks |
+| POST | `/api/classify` | Classify blocks by show (also called internally by extract) |
+| POST | `/api/extract` | Extract data, push to Google Sheets |
+| POST | `/api/redact` | Generate redacted PDF for selected show |
+| GET | `/api/sheets-check` | Test Google Sheets connection |
 
-## Notes
+---
 
-- **MVP only** — documents are stored in memory and lost on server restart.
-- **Text-based PDFs only** — scanned/image PDFs are not supported.
-- Redaction is permanent: `apply_redactions()` removes the underlying text from the PDF. The redacted areas appear as black rectangles with no recoverable content.
-- `UNCLASSIFIED` blocks are redacted (conservative approach).
-- The Google Sheets export appends rows — it does not overwrite existing data.
-- `credentials.json` and `.env` are in `.gitignore` and are not committed.
+## Design Decisions & Gotchas
+
+- **In-memory storage** — Documents live in `documents` dict. Restarting the backend clears them. No database.
+- **Text PDFs only** — Scanned/image PDFs have no extractable text blocks. Use OCR upstream if needed.
+- **Permanent redaction** — `apply_redactions()` destroys the underlying text. Redacted areas are black rectangles.
+- **Append behavior** — `worksheet.append_row(..., table_range="A1")` ensures rows append after real data, not phantom rows from deleted content.
+- **Credentials** — `credentials.json` and `.env` are gitignored. Use `GOOGLE_CREDENTIALS_JSON` env var if file read fails (e.g. permissions).
+
+---
+
+## Troubleshooting
+
+| Issue | Check |
+|-------|-------|
+| "Credit balance too low" | Anthropic account — add credits at console.anthropic.com |
+| "PermissionError" / "Cannot read credentials" | Use `GOOGLE_CREDENTIALS_JSON` in .env with full JSON on one line |
+| "Sheets API has not been used" | Enable Google Sheets API in Cloud Console |
+| "Spreadsheet not found" | Correct `GOOGLE_SHEET_ID`; sheet shared with service account |
+| Data goes to wrong row | `table_range="A1"` in sheets_service; clear phantom rows in Sheet |
+| AI returns invalid JSON | Prompts ask for raw JSON; `_strip_json_from_response()` removes markdown code blocks |
