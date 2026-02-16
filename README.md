@@ -26,7 +26,7 @@ Each text block is assigned to one category:
 
 | Category | Kept in redacted PDF? | Purpose |
 |----------|------------------------|---------|
-| Show name (e.g. "TRIGGERnometry") | Yes, if that show is selected | Show-specific terms and line items |
+| Show name (e.g. "Boomrazzle") | Yes, if that show is selected | Show-specific terms and line items |
 | `GLOBAL` | Yes | Shared terms, signatures, party names, general clauses |
 | `GLOBAL_REDACT` | **No** | Aggregate totals, combined costs, grand totals — redacted so shows can't deduce others' amounts |
 | `UNCLASSIFIED` | No | Blocks the AI couldn't confidently assign |
@@ -34,7 +34,7 @@ Each text block is assigned to one category:
 ### Row splitting (export)
 
 - One row per **insertion date**. If a show has 22 podcast insertions, you get 22 rows.
-- Podcast and newsletter billed separately → separate rows (e.g. "TRIGGERnometry Podcast", "TRIGGERnometry Newsletter").
+- Podcast and newsletter billed separately → separate rows (e.g. "Boomrazzle Podcast", "Boomrazzle Newsletter").
 - Podcast and newsletter billed together → one row with type `podcast and newsletter`.
 
 ### Type field
